@@ -7,6 +7,7 @@ import libstempo.plot as LP, libstempo.toasim as LT
 import numpy as np
 import glob, os, json
 import pickle
+import random
 
 import enterprise
 from enterprise.pulsar import Pulsar
@@ -29,21 +30,19 @@ parser = argparse.ArgumentParser(description = "Initiate data sets with stochast
 ## Required arguments:
 parser.add_argument("-timpath", required = True, help = "Path to base directory holding timfiles")
 parser.add_argument("-parpath", required = True, help = "Path to base directory containing all parfiles")
-parser.add_argument("-timsavepath", required = True, help = "Path to directory where we will save the new timfiles")
+parser.add_argument("-timsavepath", required = True, help = "Path to directory where we will save the new tim and parfiles")
 
 
 
 ## Optional arguments:
 parser.add_argument("--datacut_length", dest='datacut_length', default=7.0, help="The minimum observing baseline a pulsar must meet in order to be included in the simulation.", type=float)
-parser.add_argument("--read_pickle", dest = 'read_pickle', action = 'store', default = True, help = "Flag to read dataset as pickle to save i/o time; Default: True")
-parser.add_argument("--ephemeris", dest = 'ephem', help = "Choose solar system ephemeris for loading in pulsars; Default: DE438", choices = ['DE430', 'DE435', 'DE436', 'DE438', 'BayesEphem'], default = 'DE4368')
+parser.add_argument("--read_pickle", dest = 'read_pickle', default = False, action = 'store_true', help = "Flag to read dataset as pickle to save i/o time; Default: False")
+parser.add_argument("--ephemeris", dest = 'ephem', help = "Choose solar system ephemeris for loading in pulsars; Default: DE438", choices = ['DE430', 'DE435', 'DE436', 'DE438', 'BayesEphem'], default = 'DE438')
 parser.add_argument("--gamma", dest = 'gamma',  help = "Specify index of stochastic GWB powerlaw function; Default: 13./3.", type = float, default = 13./3.)
-parser.add_argument("--inject_fdm", dest = 'inject_fdm', default = False, help = "Whether to inject an FDM signal into our simulated data")
-parser.add_argument("--inject_GWB", dest = 'inject_GWB', default = False, help = "Whether to inject a GWB signal into our simulated data")
+parser.add_argument("--inject_fdm", dest = 'inject_fdm', action = 'store_true', default = False, help = "Whether to inject an FDM signal into our simulated data")
+parser.add_argument("--inject_GWB", dest = 'inject_GWB', action = 'store_true', default = False, help = "Whether to inject a GWB signal into our simulated data")
 parser.add_argument("--fdm_A", dest = 'fdm_A', help = "The fuzzy dark matter amplitude to inject; Default: None", default=None, type=float)
 parser.add_argument("--fdm_f", dest = 'fdm_f', help = "The fuzzy dark matter frequency to inject; Default: None", default=None, type=float)
-parser.add_argument("--fdm_phase_p", dest = 'fdm_phase_p', help = "The fuzzy dark matter pulsar term phase to inject; Default: None", default=None, type=float)
-parser.add_argument("--fdm_phase_e", dest = 'fdm_phase_e', help = "The fuzzy dark matter earth term phase to inject; Default: None", default=None, type=float)
 parser.add_argument("--GWB_A", dest = 'GWB_A', help = "The GWB amplitude to inject; Default: None", default=None, type=float)
 
 ## Load the arguments:
@@ -57,10 +56,9 @@ output_params.write(str(args) + '\n')
 if args.inject_fdm:
 
     ## If they do inject fuzzy dark matter, they must specify all of the FDM parameters or the code will exit.
-    if args.fdm_A is None or args.fdm_f is None or args.fdm_phase_p is None or args.fdm_phase_e is None:
+    if args.fdm_A is None or args.fdm_f is None:
         raise ValueError("You have decided to inject a fuzzy dark matter signal but did not specify any or all of the injected values." + \
-                     " The values you've provided are fdm_A, fdm_f, fdm_phase_p, fdm_phase_e = " + str(args.fdm_A) + ', ' + str(args.fdm_f) + ', ' \
-                     + str(args.fdm_phase_p) + ', ' + str(args.fdm_phase_e))
+                     " The values you've provided are fdm_A, fdm_f = " + str(args.fdm_A) + ', ' + str(args.fdm_f) + '.')
 
 ## Check if the user will be injecting a gravitational wave background (GWB)
 if args.inject_GWB:
@@ -68,6 +66,7 @@ if args.inject_GWB:
     ## If they do, make sure they specified the GWB amplitude
     if args.GWB_A is None:
         raise ValueError("You have decided to inject a gravitational background signal but did not specify the injected amplitude.")
+
 
 ## Check if the user has a pickle file containing the par and tim files.
 if args.read_pickle is True:
@@ -147,19 +146,25 @@ for psr in tempopsr:
 ## Inject fdm.
 if args.inject_fdm:
     print("Injecting Fuzzy Dark Matter!")
+    fdm_phase_e = random.random() * 2*np.pi
+    output_params.write('fdm_phase_e = ' + str(fdm_phase_e) + '\n')
     for psr in tempopsr:
-        LT.add_fdm(psr, args.fdm_A, args.fdm_f, args.fdm_phase_e, args.fdm_phase_p)
+        fdm_phase_p = random.random() * 2*np.pi
+        output_params.write(psr.name + ' fdm_phase_p = ' + str(fdm_phase_p) + '\n')
+        LT.add_fdm(psr, args.fdm_A, args.fdm_f, fdm_phase_e, fdm_phase_p)
 
 # Inject a GWB.
 if args.inject_GWB:
     print("Injecting Gravitational Wave Background")
     LT.createGWB(tempopsr, Amp = args.GWB_A, gam = args.gamma)
 
+for psr in tempopsr:
+    psr.fit()
+
 ## Save the tim files. 
 print("Saving the tim files!")
 for psr in tempopsr:
     psr.savetim(args.timsavepath + psr.name + '-sim.tim')
+    psr.savepar(args.timsavepath + psr.name + '-sim.par')
     libstempo.purgetim(args.timsavepath + psr.name + '-sim.tim')
     
-
-        
