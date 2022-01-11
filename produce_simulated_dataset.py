@@ -8,6 +8,8 @@ import numpy as np
 import glob, os, json
 import pickle
 import random
+import csv
+import math
 
 import enterprise
 from enterprise.pulsar import Pulsar
@@ -30,13 +32,13 @@ parser = argparse.ArgumentParser(description = "Initiate data sets with stochast
 ## Required arguments:
 parser.add_argument("-timpath", required = True, help = "Path to base directory holding timfiles")
 parser.add_argument("-parpath", required = True, help = "Path to base directory containing all parfiles")
+parser.add_argument("-noisefile", required = True, help = "Location of noisefile")
 parser.add_argument("-timsavepath", required = True, help = "Path to directory where we will save the new tim and parfiles")
 
 
 
 ## Optional arguments:
 parser.add_argument("--datacut_length", dest='datacut_length', default=7.0, help="The minimum observing baseline a pulsar must meet in order to be included in the simulation.", type=float)
-parser.add_argument("--read_pickle", dest = 'read_pickle', default = False, action = 'store_true', help = "Flag to read dataset as pickle to save i/o time; Default: False")
 parser.add_argument("--ephemeris", dest = 'ephem', help = "Choose solar system ephemeris for loading in pulsars; Default: DE438", choices = ['DE430', 'DE435', 'DE436', 'DE438', 'BayesEphem'], default = 'DE438')
 parser.add_argument("--gamma", dest = 'gamma',  help = "Specify index of stochastic GWB powerlaw function; Default: 13./3.", type = float, default = 13./3.)
 parser.add_argument("--inject_fdm", dest = 'inject_fdm', action = 'store_true', default = False, help = "Whether to inject an FDM signal into our simulated data")
@@ -44,6 +46,7 @@ parser.add_argument("--inject_GWB", dest = 'inject_GWB', action = 'store_true', 
 parser.add_argument("--fdm_A", dest = 'fdm_A', help = "The fuzzy dark matter amplitude to inject; Default: None", default=None, type=float)
 parser.add_argument("--fdm_f", dest = 'fdm_f', help = "The fuzzy dark matter frequency to inject; Default: None", default=None, type=float)
 parser.add_argument("--GWB_A", dest = 'GWB_A', help = "The GWB amplitude to inject; Default: None", default=None, type=float)
+parser.add_argument("--average_epoch", dest = 'average_epoch', help = "The epoch to average over", default=None, type=float)
 
 ## Load the arguments:
 args = parser.parse_args()
@@ -68,80 +71,127 @@ if args.inject_GWB:
         raise ValueError("You have decided to inject a gravitational background signal but did not specify the injected amplitude.")
 
 
-## Check if the user has a pickle file containing the par and tim files.
-if args.read_pickle is True:
-    psrcut = pickle.load(open(args.parpath + "psrs.p", "rb"))
+## Get parameter noise dictionary
+noise_ng12 = args.noisefile
 
-    ## Get the names of the pulsars that are in pickled dataset.
-    psrcut_parfiles = []
-    for psr in psrcut:
-        for parfile in parfiles:
-            if psr.name in parfile:
-                psrcut_parfiles.append(parfile)
-                
-    psrcut_timfiles = []
-    for psr in psrcut:
-        for timfile in timfiles:
-            if psr.name in timfile:
-                psrcut_timfiles.append(timfile)
+params = {}
+with open(noise_ng12, 'r') as noise:
+    params.update(json.load(noise))
 
-## If not, get the par and tim from their usual txt format. 
-else:
-    ## Get all of the par/tim files sorted.
-    parfiles = sorted(glob.glob(args.parpath + '*.par'))
-    timfiles = sorted(glob.glob(args.timpath + '*.tim'))
-
-    ## Get the tempo2 version of J1713
-    for parfile in parfiles:
-        if 'J1713' in parfile and 't2' not in parfile:
-            parfiles.remove(parfile)
-
-    ## Zip the par/tim files for easy access.
-    psrs = []
-    for p, t in zip(parfiles, timfiles):
-        psrname = parfiles[0].split('/')[-1].split('_')[0]
-        psr = Pulsar(p, t, ephem='DE438')
-        psrs.append(psr)
-
-    ## Eliminate all pulsars that do not have a baseline greater than our specific cutoff.
-    psrcut = []
-    for psr in psrs:
-        tmax = max(psr.toas)
-        tmin = min(psr.toas)
-        Tspan = tmax - tmin
-        if Tspan / 525600 / 60 > args.datacut_length:
-            psrcut.append(psr)
+def get_noise(psr_name):
+    
+    efac_keys = []
+    efac_vals = []
+    for key, value in params.items():
+        if psr_name in key and 'efac' in key:
+            efac_keys.append(key)
+            efac_vals.append(value)
             
-    ## Get the names of all of our remaining pulsars.
-    psrcut_parfiles = []
-    for psr in psrcut:
-        for parfile in parfiles:
-            if psr.name in parfile:
-                psrcut_parfiles.append(parfile)
-                
-    psrcut_timfiles = []
-    for psr in psrcut:
-        for timfile in timfiles:
-            if psr.name in timfile:
-                psrcut_timfiles.append(timfile)
+           
+    equad_keys = []
+    equad_vals = []
+    for key, value in params.items():
+        if psr_name in key and 'equad' in key:
+            equad_keys.append(key)
+            equad_vals.append(value)
+    
+
+    red_noise_gamma_val = [val for key, val in params.items() if psr_name in key and 'red_noise_gamma' in key][0]
+    red_noise_amp_val = [val for key, val in params.items() if psr_name in key and 'red_noise_log10_A' in key][0]
+
+
+    return efac_keys, efac_vals, equad_keys, equad_vals, red_noise_gamma_val, red_noise_amp_val
+
+def epoch_average(psr, dt=1):
+    toas, residuals = psr.toas(), psr.residuals()
+    
+    rtime = dt * np.round(toas * 86400 / dt)
+    epochs = np.sort(np.unique(rtime))
+    
+    ret = []
+    for epoch in epochs:
+        mask = (rtime == epoch)
+        resv, errv = residuals[mask], psr.toaerrs[mask]
+        
+        avgvar = 1 / np.sum(1/errv**2)
+        avgres = np.sum(resv/errv**2) * avgvar
+
+        ret.append((epoch / 86400, avgres, math.sqrt(avgvar)))
+    ret = np.array(ret)
+    
+    return ret[:,0], ret[:,1], ret[:,2]
+
+
+## Get all of the par/tim files sorted.
+parfiles = sorted(glob.glob(args.parpath + '*.par'))
+timfiles = sorted(glob.glob(args.timpath + '*.tim'))
+
+psrcut_parfiles = []
+psrcut_timfiles = []
+for i, parfile in enumerate(parfiles):
+    if 'J1713' in parfile and 't2' not in parfile:
+        parfiles.remove(parfile)
+    else:
+        with open(parfile, newline='') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if 'START' in row[0].split():
+                    start = float(row[0].split()[1])
+                    
+                if 'FINISH' in row[0].split():
+                    finish = float(row[0].split()[1])
+            
+            if (finish-start)/365.25 > args.datacut_length:
+                psrcut_parfiles.append(parfiles[i])
+                psrcut_timfiles.append(timfiles[i])
 
 ## Write the pulsar names to the output file for record keeping.
 output_params.write("This dataset includes: \n")
 # import each pulsar into tempo2
 tempopsr = []
-i=0
+
 ## Loop through the pulsars and make each a tempo2 object.
-for psr in psrcut:
-    print(psr.name)
-    output_params.write(psr.name + '\n')
+for i in range(len(psrcut_parfiles)):
     psr = libstempo.tempopulsar(parfile = psrcut_parfiles[i],
                                 timfile = psrcut_timfiles[i], maxobs=50000)
-    tempopsr.append(psr)
-    i += 1
+             
+    print('Creating Tempo object for ' + psr.name)
+    output_params.write(psr.name + '\n')
+
+    if args.average_epoch: 
+        print("This psr has " + str(len(psr.toas())) + " observations before averaging.")
+        toas, res, err = epoch_average(psr, dt=args.average_epoch)
+        fp = LT.fakepulsar(psrcut_parfiles[i], toas, err)
+        fp.stoas[:] += res / 86400
+        print("This psr has " + str(len(fp.toas())) + " observations after averaging.")
+        fp.formbats()
+
+        tempopsr.append(fp)
+
+    else:
+        tempopsr.append(psr)
+    
 
 # remove all noise from the pulsars.
 for psr in tempopsr:
-    LT.make_ideal(psr)
+    print('Adding rednoise to ' + psr.name)
+
+    efac_keys, efac_vals, equad_keys, equad_vals, red_noise_gamma_val, red_noise_amp_val = get_noise(psr.name)
+
+    if args.average_epoch:
+        efac_val = np.mean(efac_vals)
+        equad_val = np.mean(equad_vals)
+
+        LT.add_efac(psr, efac=efac_val)
+        LT.add_equad(psr, equad=equad_val)
+        LT.add_rednoise(psr, 10**red_noise_amp_val, red_noise_gamma_val)
+
+    else:
+        LT.make_ideal(psr)
+        LT.add_efac(psr, efac=efac_vals, flags = efac_keys, flagid = 'f')
+        LT.add_equad(psr, equad=equad_vals, flags = equad_keys, flagid = 'f')
+        LT.add_rednoise(psr, 10**red_noise_amp_val, red_noise_gamma_val)
+    
 
 ## Inject fdm.
 if args.inject_fdm:
@@ -158,12 +208,34 @@ if args.inject_GWB:
     print("Injecting Gravitational Wave Background")
     LT.createGWB(tempopsr, Amp = args.GWB_A, gam = args.gamma)
 
+
 for psr in tempopsr:
-    psr.fit()
+    if args.average_epoch:
+
+        for i in range(1,126):
+            psr[f'DMX_{i:04d}'].fit = False
+
+        for par in ['JUMP1','FD1','FD2','FD3']:
+            psr[par].fit = False
+
+        dmsum = np.sum(psr.designmatrix(updatebats=False,incoffset=True)**2, axis=0)
+
+        pars_to_ignore = []
+        for i in range(len(dmsum)-1):
+            if dmsum[i+1] == 0:
+                pars_to_ignore.append(psr.pars()[i])
+        
+        for par in pars_to_ignore:
+            psr[par].fit = False
+
+        psr.fit(include_noise=False)
+    else:
+        psr.fit()
 
 ## Save the tim files. 
 print("Saving the tim files!")
 for psr in tempopsr:
+
     psr.savetim(args.timsavepath + psr.name + '-sim.tim')
     psr.savepar(args.timsavepath + psr.name + '-sim.par')
     libstempo.purgetim(args.timsavepath + psr.name + '-sim.tim')
