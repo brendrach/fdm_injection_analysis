@@ -51,6 +51,11 @@ parser.add_argument("--average_epoch", dest = 'average_epoch', help = "The epoch
 ## Load the arguments:
 args = parser.parse_args()
 
+print(args.average_epoch)
+
+if args.average_epoch:
+    print('YES!')
+
 ## Begin writing all arguments to an output file for record keeping
 output_params = open(args.timsavepath + "simulation_params.txt","a")
 output_params.write(str(args) + '\n')
@@ -183,10 +188,15 @@ for psr in tempopsr:
         equad_val = np.mean(equad_vals)
 
         LT.add_efac(psr, efac=efac_val)
-        LT.add_equad(psr, equad=equad_val)
+        LT.add_equad(psr, equad=10**equad_val)
         LT.add_rednoise(psr, 10**red_noise_amp_val, red_noise_gamma_val)
 
     else:
+        for i in range(len(equad_vals)):
+            equad_vals[i] = 10**equad_vals[i]
+
+        print(equad_vals)
+
         LT.make_ideal(psr)
         LT.add_efac(psr, efac=efac_vals, flags = efac_keys, flagid = 'f')
         LT.add_equad(psr, equad=equad_vals, flags = equad_keys, flagid = 'f')
@@ -210,7 +220,10 @@ if args.inject_GWB:
 
 
 for psr in tempopsr:
+    print(psr)
     if args.average_epoch:
+
+        print("Cleaning up design matrix")
 
         for i in range(1,126):
             psr[f'DMX_{i:04d}'].fit = False
@@ -224,7 +237,7 @@ for psr in tempopsr:
         for i in range(len(dmsum)-1):
             if dmsum[i+1] == 0:
                 pars_to_ignore.append(psr.pars()[i])
-        
+
         for par in pars_to_ignore:
             psr[par].fit = False
 
@@ -239,4 +252,5 @@ for psr in tempopsr:
     psr.savetim(args.timsavepath + psr.name + '-sim.tim')
     psr.savepar(args.timsavepath + psr.name + '-sim.par')
     libstempo.purgetim(args.timsavepath + psr.name + '-sim.tim')
+    
     
